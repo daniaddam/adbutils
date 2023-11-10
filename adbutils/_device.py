@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Created on Fri May 06 2022 10:33:39 by codeskyblue
 """
+#Copyright 2023 Google LLC.
+#SPDX-License-Identifier: Apache-2.0
 
 import abc
 import dataclasses
@@ -82,7 +84,7 @@ class BaseDevice:
                        command: str = None,
                        timeout: float = _DEFAULT_SOCKET_TIMEOUT) -> AdbConnection:
         # connect has it own timeout
-        c = self._client.make_connection()
+        c = self._client._connect()
         if timeout:
             c.conn.settimeout(timeout)
 
@@ -387,7 +389,7 @@ class BaseDevice:
                        event: StopEvent, filter_func: typing.Callable[[str],
                                                                       bool]):
             try:
-                fsrc = stream.conn.makefile("r", encoding="UTF-8", errors='replace')
+                fsrc = stream.conn.makefile("r", encoding="UTF-8")
                 while not event.is_stopped():
                     line = fsrc.readline()
                     if not line:
@@ -453,7 +455,7 @@ class Sync():
 
     @contextmanager
     def _prepare_sync(self, path: str, cmd: str):
-        c = self._adbclient.make_connection()
+        c = self._adbclient._connect()
         try:
             c.send_command(":".join(["host", "transport", self._serial]))
             c.check_okay()
@@ -626,21 +628,22 @@ class AdbDevice(BaseDevice):
     def _prepare(self):
         self._record_client = None
 
-    def __screencap(self) -> Image.Image:
-        thread_id = threading.get_native_id()
-        inner_tmp_path = f"/sdcard/adbutils-tmp{thread_id}.png"
-        self.shell(["screencap", "-p", inner_tmp_path])
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                target_path = os.path.join(tmpdir, "adbutils-tmp.png")
-                self.sync.pull(inner_tmp_path, target_path)
-                im = Image.open(target_path)
-                im.load()
-                return im.convert("RGB")
-        finally:
+    def __screencap(self,screenID=None) -> Image.Image:
+        inner_tmp_path = "/sdcard/adbutils-tmp001.png"
+        if screenID:
+           self.shell(["screencap", "-d",screenID,"-p", inner_tmp_path])
+        else:
+           self.shell(["screencap", "-p", inner_tmp_path])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_path = os.path.join(tmpdir, "tmp001.png")
+            self.sync.pull(inner_tmp_path, target_path)
             self.shell(['rm', inner_tmp_path])
+            im = Image.open(target_path)
+            im.load()
+            return im.convert("RGB")
             
-    def screenshot(self) -> Image.Image:
+    def screenshot(self,screenID=None) -> Image.Image:
         """ not thread safe
         
         Note:
@@ -648,7 +651,7 @@ class AdbDevice(BaseDevice):
             Ref: https://github.com/openatx/adbutils/pull/78
         """
         try:
-            return self.__screencap()
+            return self.__screencap(screenID)
         except UnidentifiedImageError as e:
             wsize = self.window_size()
             return Image.new("RGB", wsize) # return a blank image when screenshot is not allowed
@@ -704,9 +707,6 @@ class AdbDevice(BaseDevice):
         """ adb _run input keyevent KEY_CODE """
         return self.shell(['input', 'keyevent', str(key_code)])
 
-    def __is_percent(self, v):
-        return isinstance(v, float) and v <= 1.0
-    
     def click(self, x, y):
         """
         simulate android tap
@@ -714,11 +714,6 @@ class AdbDevice(BaseDevice):
         Args:
             x, y: int
         """
-        is_percent = self.__is_percent
-        if any(map(is_percent, [x, y])):
-            w, h = self.window_size()
-            x = int(x * w) if is_percent(x) else x
-            y = int(y * h) if is_percent(y) else y
         x, y = map(str, [x, y])
         return self.shell(['input', 'tap', x, y])
 
@@ -730,13 +725,6 @@ class AdbDevice(BaseDevice):
             sx, sy: start point(x, y)
             ex, ey: end point(x, y)
         """
-        is_percent = self.__is_percent
-        if any(map(is_percent, [sx, sy, ex, ey])):
-            w, h = self.window_size()
-            sx = int(sx * w) if is_percent(sx) else sx
-            sy = int(sy * h) if is_percent(sy) else sy
-            ex = int(ex * w) if is_percent(ex) else ex
-            ey = int(ey * h) if is_percent(ey) else ey
         x1, y1, x2, y2 = map(str, [sx, sy, ex, ey])
         return self.shell(
             ['input', 'swipe', x1, y1, x2, y2,
